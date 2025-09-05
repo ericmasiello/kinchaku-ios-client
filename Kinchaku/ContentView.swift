@@ -306,6 +306,7 @@ final class OfflineListViewModel: ObservableObject {
     @Published var isBusy = false
     @Published var statusMessage: String?
     @Published var syncProgress: String?
+    @Published var isSyncing = false
 
     private let serverDate: DateFormatter = {
         let df = DateFormatter()
@@ -345,6 +346,9 @@ final class OfflineListViewModel: ObservableObject {
 
     // NEW: Fetch from remote and persist offline
     func fetchAndSyncFromServer(token: String) async {
+      if isSyncing { return }
+      isSyncing = true
+      defer { isSyncing = false }
         do {
             syncProgress = "Fetching remote list…"
             let items = try await APIService.fetchArticles(token: token)
@@ -573,6 +577,11 @@ struct OfflineAppView: View {
                     }
                 }
                 .listStyle(.insetGrouped)
+                .refreshable {
+                    if let token = appState.token {
+                        await vm.fetchAndSyncFromServer(token: token)
+                    }
+                }
             }
             .padding()
             .navigationTitle("Offline Pages")
