@@ -3,316 +3,112 @@ import WebKit
 import CommonCrypto
 import Security
 
-// MARK: - AppState
+// MARK: - AppState (Keychain-backed auth)
 
 @MainActor
 final class AppState: ObservableObject {
     @Published var token: String?
-
     private let tokenStore = KeychainTokenStore(service: "OfflinePages", account: "authToken")
-
-    init() {
-        token = tokenStore.read()
-    }
-
-    func setToken(_ newValue: String) {
-        tokenStore.save(newValue)
-        token = newValue
-    }
-
-    func logout() {
-        tokenStore.delete()
-        token = nil
-    }
+    init() { token = tokenStore.read() }
+    func setToken(_ newValue: String) { tokenStore.save(newValue); token = newValue }
+    func logout() { tokenStore.delete(); token = nil }
 }
-
-// MARK: - Keychain Token Store
 
 struct KeychainTokenStore {
-    let service: String
-    let account: String
-
+    let service: String; let account: String
     func save(_ token: String) {
         let data = Data(token.utf8)
-
-        // Try update first
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let attributes: [String: Any] = [
-            kSecValueData as String: data
-        ]
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecSuccess { return }
-
-        // Else add
-        var addQuery = query
-        addQuery[kSecValueData as String] = data
-        SecItemAdd(addQuery as CFDictionary, nil)
+        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: service,
+                                   kSecAttrAccount as String: account]
+        let status = SecItemUpdate(base as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status != errSecSuccess {
+            var add = base; add[kSecValueData as String] = data
+            SecItemAdd(add as CFDictionary, nil)
+        }
     }
-
     func read() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                kSecAttrService as String: service,
+                                kSecAttrAccount as String: account,
+                                kSecReturnData as String: true,
+                                kSecMatchLimit as String: kSecMatchLimitOne]
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else { return nil }
+        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data
+        else { return nil }
         return String(data: data, encoding: .utf8)
     }
-
     func delete() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(query as CFDictionary)
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                kSecAttrService as String: service,
+                                kSecAttrAccount as String: account]
+        SecItemDelete(q as CFDictionary)
     }
 }
 
-// MARK: - Auth Networking
+// MARK: - Networking (Auth + Articles API)
 
 struct LoginResponse: Codable { let token: String }
 
 enum AuthService {
     static func login(email: String, password: String) async throws -> String {
-        guard let url = URL(string: "https://kinchaku.synology.me/api/v1/auth/login") else {
-            throw URLError(.badURL)
-        }
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: URL(string: "https://kinchaku.synology.me/api/v1/auth/login")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(["email": email, "password": password])
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(domain: "Auth", code: code, userInfo: [NSLocalizedDescriptionKey: "Login failed (\(code))"])
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+            throw URLError(.userAuthenticationRequired)
         }
-        let login = try JSONDecoder().decode(LoginResponse.self, from: data)
-        return login.token
+        return try JSONDecoder().decode(LoginResponse.self, from: data).token
     }
 }
 
-// MARK: - Root Switcher
+// Server payload
+struct ArticlesEnvelope: Codable { let items: [RemoteArticle] }
+struct RemoteArticle: Codable, Hashable {
+    let id: Int
+    let url: URL
+    let archived: Int
+    let favorited: Int
+    let date_added: String
+    let updated_at: String
+}
 
-struct ContentView: View {
-    @StateObject private var appState = AppState()
-    var body: some View {
-        Group {
-            if let _ = appState.token {
-                OfflineAppView()
-                    .environmentObject(appState)
-            } else {
-                LoginView()
-                    .environmentObject(appState)
-            }
+enum APIService {
+    static func fetchArticles(token: String) async throws -> [RemoteArticle] {
+        var req = URLRequest(url: URL(string: "https://kinchaku.synology.me/api/v1/articles")!)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
         }
+        return try JSONDecoder().decode(ArticlesEnvelope.self, from: data).items
     }
 }
 
-// MARK: - Login View
-
-@MainActor
-final class LoginViewModel: ObservableObject {
-    @Published var email = ""
-    @Published var password = ""
-    @Published var isBusy = false
-    @Published var errorMessage: String?
-
-    func canSubmit() -> Bool {
-        !email.isEmpty && !password.isEmpty && !isBusy
-    }
-
-    func submit(appState: AppState) async {
-        guard canSubmit() else { return }
-        isBusy = true
-        errorMessage = nil
-        defer { isBusy = false }
-        do {
-            let token = try await AuthService.login(email: email, password: password)
-            appState.setToken(token)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-}
-
-struct LoginView: View {
-    @EnvironmentObject var appState: AppState
-    @StateObject private var vm = LoginViewModel()
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        NavigationView {
-            VStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("Email", text: $vm.email)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.emailAddress)
-                        .autocorrectionDisabled()
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focused)
-                    SecureField("Password", text: $vm.password)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                if let error = vm.errorMessage {
-                    Text(error).foregroundColor(.red).font(.footnote)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Button {
-                    Task { await vm.submit(appState: appState) }
-                } label: {
-                    if vm.isBusy { ProgressView() } else { Text("Log In") }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!vm.canSubmit())
-
-                Spacer()
-            }
-            .padding()
-            .navigationTitle("Sign In")
-            .onAppear { focused = true }
-        }
-    }
-}
-
-// MARK: - Offline Reader App (existing functionality)
-
-struct OfflineAppView: View {
-    @EnvironmentObject var appState: AppState
-    @StateObject private var vm = OfflineListViewModel()
-    @State private var selectedPage: OfflinePage?
-
-    var body: some View {
-        NavigationView {
-            VStack(spacing: 12) {
-                HStack {
-                    TextField("https://example.com", text: $vm.inputURLString)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.roundedBorder)
-                    Button {
-                        Task { await vm.downloadAndSave() }
-                    } label: {
-                      if vm.isBusy {
-                        ProgressView()
-                      } else {
-                        Text("Save")
-                      }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!vm.canDownload || vm.isBusy)
-                }
-
-                HStack {
-                    if let status = vm.statusMessage {
-                        Text(status)
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Button(role: .destructive) {
-                        appState.logout()
-                    } label: {
-                        Label("Logout", systemImage: "rectangle.portrait.and.arrow.right")
-                    }
-                }
-
-                List {
-                    if !vm.activePages.isEmpty {
-                        Section("Saved (Newest)") {
-                            ForEach(vm.activePages) { page in
-                                PageRow(page: page)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { selectedPage = page }
-                                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                        Button(role: .destructive) { vm.delete(page) } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                        Button { vm.archive(page, archived: true) } label: {
-                                            Label("Archive", systemImage: "archivebox")
-                                        }.tint(.gray)
-                                    }
-                                    .swipeActions(edge: .leading) {
-                                        Button { selectedPage = page } label: {
-                                            Label("Open", systemImage: "arrow.forward.circle")
-                                        }.tint(.blue)
-                                    }
-                            }
-                        }
-                    }
-
-                    if !vm.archivedPages.isEmpty {
-                        Section("Archived") {
-                            ForEach(vm.archivedPages) { page in
-                                PageRow(page: page)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { selectedPage = page }
-                                    .swipeActions {
-                                        Button { vm.archive(page, archived: false) } label: {
-                                            Label("Unarchive", systemImage: "archivebox.fill")
-                                        }
-                                        Button(role: .destructive) { vm.delete(page) } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                            }
-                        }
-                    }
-
-                    if vm.activePages.isEmpty && vm.archivedPages.isEmpty {
-                        ContentUnavailableView("No offline pages yet",
-                                               systemImage: "tray",
-                                               description: Text("Paste a URL above and tap Save."))
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-                .listStyle(.insetGrouped)
-            }
-            .padding()
-            .navigationTitle("Offline Pages")
-            .sheet(item: $selectedPage) { page in
-                OfflineReaderView(page: page)
-            }
-        }
-    }
-}
-
-// === Existing models, storage, downloader, web view ===
-// (unchanged from your multi-page version)
+// MARK: - Models + Persistence
 
 struct OfflinePage: Identifiable, Codable, Equatable {
     let id: UUID
+    var remoteId: Int?               // <-- added to track server item
     var title: String
     var originalURL: URL
-    var dirName: String
+    var dirName: String?             // nil until cached to disk
     var dateAdded: Date
     var archived: Bool
+    var favorited: Bool
 }
 
-struct IndexFile: Codable {
-    var pages: [OfflinePage] = []
-}
+struct IndexFile: Codable { var pages: [OfflinePage] = [] }
 
 enum OfflineIndex {
     private static var fm: FileManager { .default }
-
     static var rootDir: URL {
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
         return docs.appendingPathComponent("OfflineSites", isDirectory: true)
     }
-
     private static var indexURL: URL { rootDir.appendingPathComponent("_index.json") }
 
     static func load() -> [OfflinePage] {
@@ -327,19 +123,26 @@ enum OfflineIndex {
         if let data { try? data.write(to: indexURL, options: .atomic) }
     }
 
-    static func removeDir(named dirName: String) {
+    static func fileURL(for page: OfflinePage) -> URL? {
+        guard let dir = page.dirName else { return nil }
+        return rootDir.appendingPathComponent(dir).appendingPathComponent("index.html")
+    }
+    static func allowAccessDir(for page: OfflinePage) -> URL? {
+        guard let dir = page.dirName else { return nil }
+        return rootDir.appendingPathComponent(dir)
+    }
+    static func hasCache(for page: OfflinePage) -> Bool {
+        guard let file = fileURL(for: page) else { return false }
+        return FileManager.default.fileExists(atPath: file.path)
+    }
+    static func removeCache(dirName: String?) {
+        guard let dirName else { return }
         let url = rootDir.appendingPathComponent(dirName, isDirectory: true)
-        try? fm.removeItem(at: url)
-    }
-
-    static func fileURL(for page: OfflinePage) -> URL {
-        rootDir.appendingPathComponent(page.dirName).appendingPathComponent("index.html")
-    }
-
-    static func allowAccessDir(for page: OfflinePage) -> URL {
-        rootDir.appendingPathComponent(page.dirName)
+        try? FileManager.default.removeItem(at: url)
     }
 }
+
+// MARK: - Downloader (first-order assets + rewrite)
 
 enum OfflineError: Error { case badResponse, invalidHTML, unsupportedScheme }
 
@@ -353,7 +156,6 @@ struct DownloadResult {
 enum OfflineDownloader {
     static func downloadSite(at url: URL) async throws -> DownloadResult {
         guard url.scheme?.hasPrefix("http") == true else { throw OfflineError.unsupportedScheme }
-
         let dirName = folderName(for: url)
         let siteDir = OfflineIndex.rootDir.appendingPathComponent(dirName, isDirectory: true)
         try? FileManager.default.removeItem(at: siteDir)
@@ -368,9 +170,7 @@ enum OfflineDownloader {
         let pageTitle = extractTitle(from: html) ?? url.host ?? "Untitled"
         let assets = HTMLAssetExtractor.extractAssetURLs(in: html, baseURL: url)
 
-        var replacements: [(String, String)] = []
-        var count = 0
-
+        var replacements: [(String, String)] = []; var count = 0
         try await withThrowingTaskGroup(of: (String, String)?.self) { group in
             for asset in assets {
                 group.addTask {
@@ -389,11 +189,9 @@ enum OfflineDownloader {
                 if let p = pair { replacements.append(p); count += 1 }
             }
         }
-
         for (orig, rel) in replacements.sorted(by: { $0.0.count > $1.0.count }) {
             html = html.replacingOccurrences(of: orig, with: rel)
         }
-
         let indexHTML = siteDir.appendingPathComponent("index.html")
         try html.data(using: .utf8)?.write(to: indexHTML, options: .atomic)
         return .init(dirName: dirName, indexHTML: indexHTML, assetCount: count, pageTitle: pageTitle)
@@ -403,11 +201,9 @@ enum OfflineDownloader {
         let t = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         return "\(safeHost(url.host ?? "site"))__\(sha1(url.absoluteString))__\(t)"
     }
-
     private static func safeHost(_ s: String) -> String {
         s.replacingOccurrences(of: "[^A-Za-z0-9.-]", with: "_", options: .regularExpression)
     }
-
     private static func localPathFor(assetURL: URL, under root: URL) -> URL {
         var path = assetURL.host.map { "assets/\($0)\(assetURL.path)" } ?? "assets\(assetURL.path)"
         if path.hasSuffix("/") { path.append("index.txt") }
@@ -419,7 +215,6 @@ enum OfflineDownloader {
         }
         return root.appendingPathComponent(path)
     }
-
     private static func extractTitle(from html: String) -> String? {
         let pattern = #"<title[^>]*>(.*?)</title>"#
         guard let r = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { return nil }
@@ -427,14 +222,14 @@ enum OfflineDownloader {
         guard let m = r.firstMatch(in: html, range: NSRange(location: 0, length: ns.length)) else { return nil }
         return ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
-
     private static func sha1(_ s: String) -> String {
-        let data = Data(s.utf8)
-        var digest = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
+        let data = Data(s.utf8); var digest = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
         data.withUnsafeBytes { CC_SHA1($0.baseAddress, CC_LONG(data.count), &digest) }
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
+
+// MARK: - HTML Asset Extraction
 
 enum HTMLAssetExtractor {
     static func extractAssetURLs(in html: String, baseURL: URL) -> [URL] {
@@ -449,7 +244,6 @@ enum HTMLAssetExtractor {
             return allowedExts.contains(u.pathExtension.lowercased())
         }
     }
-
     private static func extractURLs(html: String, baseURL: URL, pattern: String) -> Set<URL> {
         var out: Set<URL> = []
         let regex = try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
@@ -457,14 +251,14 @@ enum HTMLAssetExtractor {
         for match in regex.matches(in: html, options: [], range: NSRange(location: 0, length: ns.length)) {
             guard match.numberOfRanges >= 2 else { continue }
             let s = ns.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !s.lowercased().hasPrefix("data:"),
-                  !s.lowercased().hasPrefix("mailto:"),
-                  !s.lowercased().hasPrefix("tel:") else { continue }
+            guard !s.lowercased().hasPrefix("data:"), !s.lowercased().hasPrefix("mailto:"), !s.lowercased().hasPrefix("tel:") else { continue }
             if let u = URL(string: s, relativeTo: baseURL)?.absoluteURL { out.insert(u) }
         }
         return out
     }
 }
+
+// MARK: - URL helper
 
 private extension URL {
     func path(relativeTo base: URL) -> String {
@@ -473,6 +267,8 @@ private extension URL {
         return self.path.replacingOccurrences(of: base.path, with: "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 }
+
+// MARK: - WebView wrapper
 
 struct WebView: UIViewRepresentable {
     let fileURL: URL
@@ -487,7 +283,21 @@ struct WebView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 
-// MARK: - List VM + Views
+// MARK: - View Models
+
+@MainActor
+final class LoginViewModel: ObservableObject {
+    @Published var email = ""; @Published var password = ""
+    @Published var isBusy = false; @Published var errorMessage: String?
+    func canSubmit() -> Bool { !email.isEmpty && !password.isEmpty && !isBusy }
+    func submit(appState: AppState) async {
+        guard canSubmit() else { return }
+        isBusy = true; errorMessage = nil
+        defer { isBusy = false }
+        do { appState.setToken(try await AuthService.login(email: email, password: password)) }
+        catch { errorMessage = error.localizedDescription }
+    }
+}
 
 @MainActor
 final class OfflineListViewModel: ObservableObject {
@@ -495,6 +305,15 @@ final class OfflineListViewModel: ObservableObject {
     @Published var inputURLString: String = ""
     @Published var isBusy = false
     @Published var statusMessage: String?
+    @Published var syncProgress: String?
+
+    private let serverDate: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone(secondsFromGMT: 0)
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return df
+    }()
 
     init() {
         pages = OfflineIndex.load()
@@ -506,29 +325,95 @@ final class OfflineListViewModel: ObservableObject {
     var archivedPages: [OfflinePage] { pages.filter { $0.archived } }
     var canDownload: Bool { URL(string: inputURLString)?.scheme?.hasPrefix("http") == true }
 
+    // Manual add (still supported)
     func downloadAndSave() async {
         guard let url = URL(string: inputURLString) else { return }
-        isBusy = true
-        defer { isBusy = false }
+        isBusy = true; defer { isBusy = false }
         statusMessage = "Downloading…"
-
         do {
             let result = try await OfflineDownloader.downloadSite(at: url)
             let page = OfflinePage(
-                id: UUID(),
-                title: result.pageTitle,
-                originalURL: url,
-                dirName: result.dirName,
-                dateAdded: Date(),
-                archived: false
+                id: UUID(), remoteId: nil, title: result.pageTitle, originalURL: url,
+                dirName: result.dirName, dateAdded: Date(), archived: false, favorited: false
             )
             pages.insert(page, at: 0)
-            OfflineIndex.save(pages)
-            sortPages()
+            OfflineIndex.save(pages); sortPages()
             statusMessage = "Saved “\(page.title)” (\(result.assetCount) assets)"
             inputURLString = ""
+        } catch { statusMessage = "Download failed: \(error.localizedDescription)" }
+    }
+
+    // NEW: Fetch from remote and persist offline
+    func fetchAndSyncFromServer(token: String) async {
+        do {
+            syncProgress = "Fetching remote list…"
+            let items = try await APIService.fetchArticles(token: token)
+
+            // Merge: update existing by remoteId or URL; add new ones
+            var byRemoteId = Dictionary(uniqueKeysWithValues: pages.compactMap { p in
+                p.remoteId.map { ($0, p) }
+            })
+            var updatedPages = pages
+
+            for item in items {
+                // Map server → model
+                let date = serverDate.date(from: item.date_added) ?? Date()
+                let archived = item.archived != 0
+                let favorited = item.favorited != 0
+
+                if let existing = byRemoteId[item.id] ?? pages.first(where: { $0.originalURL == item.url }) {
+                    // Update flags & date; keep cache dir if any
+                    if let idx = updatedPages.firstIndex(where: { $0.id == existing.id }) {
+                        updatedPages[idx].remoteId = item.id
+                        updatedPages[idx].archived = archived
+                        updatedPages[idx].favorited = favorited
+                        updatedPages[idx].dateAdded = date
+                    }
+                } else {
+                    // New local entry (not yet cached)
+                    updatedPages.append(OfflinePage(
+                        id: UUID(), remoteId: item.id, title: item.url.host ?? "Untitled",
+                        originalURL: item.url, dirName: nil, dateAdded: date,
+                        archived: archived, favorited: favorited
+                    ))
+                }
+            }
+
+            // Sort + save index before caching so UI shows immediately
+            pages = updatedPages
+            sortPages()
+            OfflineIndex.save(pages)
+
+            // Cache all uncached pages in parallel (first-order assets)
+            let toCache = pages.filter { !$0.archived && !OfflineIndex.hasCache(for: $0) }
+            if !toCache.isEmpty {
+                syncProgress = "Caching \(toCache.count) pages for offline…"
+                try await withThrowingTaskGroup(of: (UUID, DownloadResult).self) { group in
+                    for page in toCache {
+                        group.addTask {
+                            let result = try await OfflineDownloader.downloadSite(at: page.originalURL)
+                            return (page.id, result)
+                        }
+                    }
+                    var map: [UUID: DownloadResult] = [:]
+                    for try await (pid, res) in group { map[pid] = res }
+                    // Write back dir names and titles
+                    for i in pages.indices {
+                        if let res = map[pages[i].id] {
+                            pages[i].dirName = res.dirName
+                            if pages[i].title.isEmpty || pages[i].title == (pages[i].originalURL.host ?? "") {
+                                pages[i].title = res.pageTitle
+                            }
+                        }
+                    }
+                }
+                OfflineIndex.save(pages)
+                syncProgress = "Offline cache complete."
+            } else {
+                syncProgress = "Everything is already cached."
+            }
         } catch {
-            statusMessage = "Download failed: \(error.localizedDescription)"
+            syncProgress = "Sync failed: \(error.localizedDescription)"
         }
     }
 
@@ -540,9 +425,167 @@ final class OfflineListViewModel: ObservableObject {
     }
 
     func delete(_ page: OfflinePage) {
-        OfflineIndex.removeDir(named: page.dirName)
+        OfflineIndex.removeCache(dirName: page.dirName)
         pages.removeAll { $0.id == page.id }
         OfflineIndex.save(pages)
+    }
+}
+
+// MARK: - Views
+
+struct ContentView: View {
+    @StateObject private var appState = AppState()
+    var body: some View {
+        Group {
+            if let _ = appState.token {
+                OfflineAppView()
+                    .environmentObject(appState)
+            } else {
+                LoginView()
+                    .environmentObject(appState)
+            }
+        }
+    }
+}
+
+struct LoginView: View {
+    @EnvironmentObject var appState: AppState
+    @StateObject private var vm = LoginViewModel()
+    @FocusState private var focused: Bool
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 16) {
+                TextField("Email", text: $vm.email)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.emailAddress)
+                    .autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focused)
+                SecureField("Password", text: $vm.password)
+                    .textFieldStyle(.roundedBorder)
+
+                if let err = vm.errorMessage {
+                    Text(err).foregroundColor(.red).font(.footnote)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Button {
+                    Task { await vm.submit(appState: appState) }
+                } label: {
+                    vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Log In"))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!vm.canSubmit())
+
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Sign In")
+            .onAppear { focused = true }
+        }
+    }
+}
+
+struct OfflineAppView: View {
+    @EnvironmentObject var appState: AppState
+    @StateObject private var vm = OfflineListViewModel()
+    @State private var selectedPage: OfflinePage?
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 12) {
+                // Status / actions row
+                HStack {
+                    if let msg = vm.statusMessage { Text(msg).font(.footnote).foregroundColor(.secondary) }
+                    Spacer()
+                    Button(role: .destructive) { appState.logout() } label: {
+                        Label("Logout", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                }
+
+                if let sync = vm.syncProgress {
+                    HStack {
+                        ProgressView()
+                        Text(sync).font(.footnote).foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }
+
+                // Manual add (still supported)
+                HStack {
+                    TextField("https://example.com", text: $vm.inputURLString)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        Task { await vm.downloadAndSave() }
+                    } label: { vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Save")) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!vm.canDownload || vm.isBusy)
+                }
+
+                // List
+                List {
+                    if !vm.activePages.isEmpty {
+                        Section("Saved (Newest)") {
+                            ForEach(vm.activePages) { page in
+                                PageRow(page: page)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { if OfflineIndex.hasCache(for: page) { selectedPage = page } }
+                                    .overlay(alignment: .trailing) {
+                                        if !OfflineIndex.hasCache(for: page) {
+                                            Text("Downloading…").font(.caption2).foregroundColor(.secondary)
+                                        }
+                                    }
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                        Button(role: .destructive) { vm.delete(page) } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                        Button { vm.archive(page, archived: true) } label: {
+                                            Label("Archive", systemImage: "archivebox")
+                                        }.tint(.gray)
+                                    }
+                            }
+                        }
+                    }
+                    if !vm.archivedPages.isEmpty {
+                        Section("Archived") {
+                            ForEach(vm.archivedPages) { page in
+                                PageRow(page: page)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { if OfflineIndex.hasCache(for: page) { selectedPage = page } }
+                                    .swipeActions {
+                                        Button { vm.archive(page, archived: false) } label: {
+                                            Label("Unarchive", systemImage: "archivebox.fill")
+                                        }
+                                        Button(role: .destructive) { vm.delete(page) } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                    if vm.activePages.isEmpty && vm.archivedPages.isEmpty {
+                        ContentUnavailableView("No pages",
+                                               systemImage: "tray",
+                                               description: Text("Sign in and your saved list will appear here."))
+                    }
+                }
+                .listStyle(.insetGrouped)
+            }
+            .padding()
+            .navigationTitle("Offline Pages")
+            .sheet(item: $selectedPage) { page in
+                OfflineReaderView(page: page)
+            }
+            .task {
+                // Fetch remote items and cache them for offline, using stored token
+                if let token = appState.token {
+                    await vm.fetchAndSyncFromServer(token: token)
+                }
+            }
+        }
     }
 }
 
@@ -554,18 +597,18 @@ struct PageRow: View {
                 .imageScale(.large)
             VStack(alignment: .leading, spacing: 2) {
                 Text(page.title.isEmpty ? page.originalURL.absoluteString : page.title)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(page.originalURL.host ?? page.originalURL.absoluteString)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
+                    .font(.headline).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(page.originalURL.host ?? page.originalURL.absoluteString)
+                    if page.favorited { Image(systemName: "star.fill") }
+                }
+                .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
             }
             Spacer()
-            Text(page.dateAdded, style: .relative)
-                .font(.footnote)
-                .foregroundColor(.secondary)
-        }.padding(.vertical, 4)
+            Text(page.dateAdded, style: .date)
+                .font(.footnote).foregroundColor(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -574,22 +617,24 @@ struct OfflineReaderView: View, Identifiable {
     let page: OfflinePage
     var body: some View {
         NavigationView {
-            WebView(
-                fileURL: OfflineIndex.fileURL(for: page),
-                allowDir: OfflineIndex.allowAccessDir(for: page)
-            )
-            .navigationTitle(page.title.isEmpty ? "Offline Page" : page.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Link(destination: page.originalURL) {
-                        Image(systemName: "safari")
+            if let file = OfflineIndex.fileURL(for: page),
+               let dir = OfflineIndex.allowAccessDir(for: page) {
+                WebView(fileURL: file, allowDir: dir)
+                    .navigationTitle(page.title.isEmpty ? "Offline Page" : page.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Link(destination: page.originalURL) { Image(systemName: "safari") }
+                        }
                     }
-                }
+            } else {
+                Text("This page is not cached yet.").padding()
             }
         }
     }
 }
+
+
 
 
 // example of fetching data with something that requires the token
