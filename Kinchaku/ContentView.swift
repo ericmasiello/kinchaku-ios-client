@@ -76,6 +76,28 @@ struct RemoteArticle: Codable, Hashable {
     let updated_at: String
 }
 
+struct CreateArticlePayload: Codable {
+    let url: String
+    let favorited: Bool
+}
+
+extension APIService {
+    static func createArticle(token: String, url: URL, favorited: Bool) async throws -> RemoteArticle {
+        var req = URLRequest(url: URL(string: "https://kinchaku.synology.me/api/v1/articles")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = try JSONEncoder().encode(CreateArticlePayload(url: url.absoluteString, favorited: favorited))
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 201 else {
+            throw URLError(.badServerResponse)
+        }
+        // The server returns the same shape as RemoteArticle
+        return try JSONDecoder().decode(RemoteArticle.self, from: data)
+    }
+}
+
 enum APIService {
     static func fetchArticles(token: String) async throws -> [RemoteArticle] {
         var req = URLRequest(url: URL(string: "https://kinchaku.synology.me/api/v1/articles")!)
@@ -327,22 +349,54 @@ final class OfflineListViewModel: ObservableObject {
     var canDownload: Bool { URL(string: inputURLString)?.scheme?.hasPrefix("http") == true }
 
     // Manual add (still supported)
-    func downloadAndSave() async {
-        guard let url = URL(string: inputURLString) else { return }
-        isBusy = true; defer { isBusy = false }
-        statusMessage = "Downloading…"
-        do {
-            let result = try await OfflineDownloader.downloadSite(at: url)
-            let page = OfflinePage(
-                id: UUID(), remoteId: nil, title: result.pageTitle, originalURL: url,
-                dirName: result.dirName, dateAdded: Date(), archived: false, favorited: false
-            )
-            pages.insert(page, at: 0)
-            OfflineIndex.save(pages); sortPages()
-            statusMessage = "Saved “\(page.title)” (\(result.assetCount) assets)"
-            inputURLString = ""
-        } catch { statusMessage = "Download failed: \(error.localizedDescription)" }
-    }
+  func downloadAndSave(token: String? = nil, favorited: Bool = false) async {
+      guard let url = URL(string: inputURLString) else { return }
+      isBusy = true
+      defer { isBusy = false }
+      statusMessage = "Downloading…"
+
+      do {
+          // 1) Local cache first (as before)
+          let result = try await OfflineDownloader.downloadSite(at: url)
+          var page = OfflinePage(
+              id: UUID(),
+              remoteId: nil,
+              title: result.pageTitle,
+              originalURL: url,
+              dirName: result.dirName,
+              dateAdded: Date(),
+              archived: false,
+              favorited: favorited
+          )
+          pages.insert(page, at: 0)
+          sortPages()
+          OfflineIndex.save(pages)
+          statusMessage = "Saved “\(page.title)” locally (\(result.assetCount) assets)"
+          inputURLString = ""
+
+          // 2) Then POST to API (best-effort). On success 201, merge fields.
+          if let token {
+              do {
+                  let created = try await APIService.createArticle(token: token, url: url, favorited: favorited)
+                  let serverDate = serverDate // reuse the formatter already defined on the VM
+                  if let idx = pages.firstIndex(where: { $0.id == page.id }) {
+                      pages[idx].remoteId  = created.id
+                      pages[idx].archived  = created.archived != 0
+                      pages[idx].favorited = created.favorited != 0
+                      pages[idx].dateAdded = serverDate.date(from: created.date_added) ?? pages[idx].dateAdded
+                  }
+                  sortPages()
+                  OfflineIndex.save(pages)
+                  statusMessage = "Saved locally and synced to server (id \(created.id))."
+              } catch {
+                  // Keep local record; report but don’t roll back
+                  statusMessage = "Saved locally. Server create failed: \(error.localizedDescription)"
+              }
+          }
+      } catch {
+          statusMessage = "Download failed: \(error.localizedDescription)"
+      }
+  }
 
     // NEW: Fetch from remote and persist offline
     func fetchAndSyncFromServer(token: String) async {
@@ -523,8 +577,12 @@ struct OfflineAppView: View {
                         .disableAutocorrection(true)
                         .textFieldStyle(.roundedBorder)
                     Button {
-                        Task { await vm.downloadAndSave() }
-                    } label: { vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Save")) }
+                        Task {
+                            await vm.downloadAndSave(token: appState.token, favorited: false)
+                        }
+                    } label: {
+                        vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Save"))
+                    }
                     .buttonStyle(.borderedProminent)
                     .disabled(!vm.canDownload || vm.isBusy)
                 }
