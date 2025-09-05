@@ -1,0 +1,51 @@
+//
+//  LoginView.swift
+//  Kinchaku
+//
+//  Created by Eric Masiello on 9/5/25.
+//
+
+import SwiftUI
+
+struct LoginView: View {
+  @EnvironmentObject var appState: AppState
+  @StateObject private var vm = LoginViewModel()
+  @FocusState private var focused: Bool
+  var body: some View {
+    NavigationView {
+      VStack(spacing: 16) {
+        TextField("Email", text: $vm.email)
+          .textInputAutocapitalization(.never)
+          .keyboardType(.emailAddress)
+          .autocorrectionDisabled()
+          .textFieldStyle(.roundedBorder)
+          .focused($focused)
+        SecureField("Password", text: $vm.password)
+          .textFieldStyle(.roundedBorder)
+
+        if let err = vm.errorMessage {
+          Text(err).foregroundColor(.red).font(.footnote)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
+        Button {
+          Task { await vm.submit(appState: appState) }
+        } label: {
+          vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Log In"))
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!vm.canSubmit())
+
+        Spacer()
+      }
+      .padding()
+      .navigationTitle("Kinchaku sign in")
+      .onAppear { focused = true }
+    }
+  }
+}
+
+#Preview {
+  let appState = PreviewFixtures.makeAppState(token: nil)
+  return LoginView().environmentObject(appState)
+}
