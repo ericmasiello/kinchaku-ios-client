@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct LoginView: View {
-  @EnvironmentObject var appState: AppState
+  @EnvironmentObject var tokenStore: TokenStore
   @StateObject private var vm = LoginViewModel()
   @FocusState private var focused: Bool
   var body: some View {
@@ -29,7 +29,7 @@ struct LoginView: View {
         }
 
         Button {
-          Task { await vm.submit(appState: appState) }
+          Task { await vm.submit(tokenStore: tokenStore) }
         } label: {
           vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Log In"))
         }

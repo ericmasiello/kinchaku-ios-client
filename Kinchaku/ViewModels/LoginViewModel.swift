@@ -15,11 +15,22 @@ final class LoginViewModel: ObservableObject {
   
   func canSubmit() -> Bool { !email.isEmpty && !password.isEmpty && !isBusy }
   
-  func submit(appState: AppState) async {
-    guard canSubmit() else { return }
-    isBusy = true; errorMessage = nil
+  func submit(tokenStore: TokenStore) async {
+    guard canSubmit() else {
+      return
+    }
+    isBusy = true;
+    errorMessage = nil
+    
     defer { isBusy = false }
-    do { try appState.setToken(await AuthService.login(email: email, password: password)) }
+    
+    do {
+      
+      let loginResponse = try await AuthService.login(email: email, password: password)
+      
+      tokenStore.setToken(loginResponse.token)
+      tokenStore.setRefreshToken(loginResponse.refreshToken)
+    }
     catch { errorMessage = error.localizedDescription }
   }
 }

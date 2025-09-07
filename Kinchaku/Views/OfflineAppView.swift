@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct OfflineAppView: View {
-  @EnvironmentObject var appState: AppState
+  @EnvironmentObject var tokenStore: TokenStore
   @StateObject private var vm = OfflineListViewModel()
   @State private var selectedPage: OfflinePage?
 
@@ -41,7 +41,7 @@ struct OfflineAppView: View {
             .textFieldStyle(.roundedBorder)
           Button {
             Task {
-              await vm.downloadAndSave(token: appState.token, favorited: false)
+              await vm.downloadAndSave(token: tokenStore.token, favorited: false)
             }
           } label: {
             vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Save"))
@@ -67,7 +67,11 @@ struct OfflineAppView: View {
                     Button(role: .destructive) { vm.delete(page) } label: {
                       Label("Delete", systemImage: "trash")
                     }
-                    Button { vm.archive(page, archived: true) } label: {
+                    Button {
+                      if let token = tokenStore.token {
+                        vm.archive(page, archived: true, token: token)
+                      }
+                    } label: {
                       Label("Archive", systemImage: "archivebox")
                     }.tint(.gray)
                   }
@@ -81,7 +85,11 @@ struct OfflineAppView: View {
                   .contentShape(Rectangle())
                   .onTapGesture { if OfflineIndex.hasCache(for: page) { selectedPage = page } }
                   .swipeActions {
-                    Button { vm.archive(page, archived: false) } label: {
+                    Button {
+                      if let token = tokenStore.token {
+                        vm.archive(page, archived: false, token: token)
+                      }                      
+                    } label: {
                       Label("Unarchive", systemImage: "archivebox.fill")
                     }
                     Button(role: .destructive) { vm.delete(page) } label: {
@@ -99,7 +107,7 @@ struct OfflineAppView: View {
         }
         .listStyle(.insetGrouped)
         .refreshable {
-          if let token = appState.token {
+          if let token = tokenStore.token {
             await vm.fetchAndSyncFromServer(token: token)
           }
         }
@@ -110,7 +118,7 @@ struct OfflineAppView: View {
         ToolbarItemGroup(placement: .navigationBarTrailing) {
           Button {
             Task {
-              if let token = appState.token {
+              if let token = tokenStore.token {
                 await vm.fetchAndSyncFromServer(token: token)
               }
             }
@@ -125,19 +133,19 @@ struct OfflineAppView: View {
         }
 
         ToolbarItem(placement: .navigationBarLeading) {
-          Button(role: .destructive) { appState.logout() } label: {
+          Button(role: .destructive) { tokenStore.logout() } label: {
             Label("Logout", systemImage: "rectangle.portrait.and.arrow.right")
           }
         }
       }
 
       .task {
-        if let token = appState.token {
+        if let token = tokenStore.token {
           await vm.fetchAndSyncFromServer(token: token)
         }
       }
       .alert("Session expired", isPresented: $vm.authExpired) {
-        Button("Sign In") { appState.logout() }
+        Button("Sign In") { tokenStore.logout() }
         Button("Not now", role: .cancel) {}
       } message: {
         Text("Please sign in again to sync with the server.")

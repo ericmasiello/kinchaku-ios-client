@@ -9,7 +9,7 @@ import SwiftUI
 
 @main
 struct KinchakuApp: App {
-  @StateObject private var appState = AppState()
+  @StateObject private var appState = TokenStore()
   var body: some Scene {
     WindowGroup {
       ContentView().environmentObject(appState)

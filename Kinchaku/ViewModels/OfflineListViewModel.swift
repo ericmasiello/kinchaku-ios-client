@@ -65,7 +65,7 @@ final class OfflineListViewModel: ObservableObject {
       // 2) Then POST to API (best-effort). On success 201, merge fields.
       if let token {
         do {
-          let created = try await APIService.createArticle(token: token, url: url, favorited: favorited)
+          let created = try await ArticlesService.createArticle(token: token, url: url, favorited: favorited)
           let serverDate = serverDate // reuse the formatter already defined on the VM
           if let idx = pages.firstIndex(where: { $0.id == page.id }) {
             pages[idx].remoteId = created.id
@@ -98,7 +98,7 @@ final class OfflineListViewModel: ObservableObject {
     defer { isSyncing = false }
     do {
       syncProgress = "Fetching remote list…"
-      let items = try await APIService.fetchArticles(token: token)
+      let items = try await ArticlesService.fetchArticles(token: token)
 
       // Merge: update existing by remoteId or URL; add new ones
       let byRemoteId = Dictionary(uniqueKeysWithValues: pages.compactMap { p in
@@ -173,13 +173,50 @@ final class OfflineListViewModel: ObservableObject {
     }
   }
 
-  func archive(_ page: OfflinePage, archived: Bool) {
+  func archive(_ page: OfflinePage, archived: Bool, token: String?) {
     guard let i = pages.firstIndex(of: page) else { return }
+
+    // 1) Optimistic local update
     pages[i].archived = archived
     sortPages()
     OfflineIndex.save(pages)
+    statusMessage = archived ? "Archived locally." : "Unarchived locally."
+
+    #if os(iOS)
+    UIAccessibility.post(
+      notification: .announcement,
+      argument: archived ? "Archived" : "Unarchived"
+    )
+    #endif
+
+    // 2) Attempt to persist to server (best-effort)
+    guard let remoteId = pages[i].remoteId else { return }
+
+    if let token {
+      Task {
+        do {
+          try await ArticlesService.updateArticleArchived(token: token, articleId: remoteId, archived: archived)
+          await MainActor.run {
+            self.statusMessage = archived ? "Archived on server." : "Unarchived on server."
+          }
+        } catch let err as AuthError {
+          if case .expired = err {
+            await MainActor.run {
+              self.authExpired = true
+              self.statusMessage = "Local change saved. Sign in again to sync archive state."
+            }
+          }
+        } catch {
+          await MainActor.run {
+            self.statusMessage = "Local change saved. Server update failed: \(error.localizedDescription)"
+          }
+        }
+      }
+    }
+    
   }
 
+  // TODO: Add API Implementation
   func delete(_ page: OfflinePage) {
     OfflineIndex.removeCache(dirName: page.dirName)
     pages.removeAll { $0.id == page.id }

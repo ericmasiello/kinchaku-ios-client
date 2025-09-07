@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-  @EnvironmentObject var appState: AppState
+  @EnvironmentObject var appState: TokenStore
   var body: some View {
     Group {
       if let _ = appState.token {
