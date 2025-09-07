@@ -50,6 +50,18 @@ enum ArticlesService {
     if http.statusCode == 401 { throw AuthError.expired }
     guard (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
   }
+
+  static func deleteArticle(token: String, articleId: Int) async throws {
+    var req = URLRequest(url: URL(string: "\(BaseAPIService.url)/articles/\(articleId)")!)
+    req.httpMethod = "DELETE"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+    let (_, resp) = try await URLSession.shared.data(for: req)
+    guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+    if http.statusCode == 401 { throw AuthError.expired }
+    guard (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
+  }
 }
 
 // class ArticleWrappedService {

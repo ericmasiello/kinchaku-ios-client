@@ -64,7 +64,11 @@ struct OfflineAppView: View {
                     }
                   }
                   .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button(role: .destructive) { vm.delete(page) } label: {
+                    Button(role: .destructive) {
+                      if let token = tokenStore.token {
+                        vm.delete(page, token: token)
+                      }
+                    } label: {
                       Label("Delete", systemImage: "trash")
                     }
                     Button {
@@ -88,11 +92,15 @@ struct OfflineAppView: View {
                     Button {
                       if let token = tokenStore.token {
                         vm.archive(page, archived: false, token: token)
-                      }                      
+                      }
                     } label: {
                       Label("Unarchive", systemImage: "archivebox.fill")
                     }
-                    Button(role: .destructive) { vm.delete(page) } label: {
+                    Button(role: .destructive) {
+                      if let token = tokenStore.token {
+                        vm.delete(page, token: token)
+                      }
+                    } label: {
                       Label("Delete", systemImage: "trash")
                     }
                   }

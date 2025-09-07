@@ -217,9 +217,48 @@ final class OfflineListViewModel: ObservableObject {
   }
 
   // TODO: Add API Implementation
-  func delete(_ page: OfflinePage) {
+  func delete(_ page: OfflinePage, token: String?) {
+    // 1) Optimistic local update
     OfflineIndex.removeCache(dirName: page.dirName)
     pages.removeAll { $0.id == page.id }
     OfflineIndex.save(pages)
+    statusMessage = "Deleted locally."
+
+    #if os(iOS)
+    UIAccessibility.post(
+      notification: .announcement,
+      argument: "Deleted"
+    )
+    #endif
+
+    // 2) Attempt to persist to server (best-effort)
+    guard let remoteId = page.remoteId else { return }
+
+    // You may want to pass a token here, similar to archive
+    // For now, assume a token property or argument is available
+    // If you want to require token, add it as an argument
+    // Example: func delete(_ page: OfflinePage, token: String?)
+    // For now, try to use a token if available    
+    if let token {
+      Task {
+        do {
+          try await ArticlesService.deleteArticle(token: token, articleId: remoteId)
+          await MainActor.run {
+            self.statusMessage = "Deleted on server."
+          }
+        } catch let err as AuthError {
+          if case .expired = err {
+            await MainActor.run {
+              self.authExpired = true
+              self.statusMessage = "Local delete saved. Sign in again to sync delete state."
+            }
+          }
+        } catch {
+          await MainActor.run {
+            self.statusMessage = "Local delete saved. Server delete failed: \(error.localizedDescription)"
+          }
+        }
+      }
+    }
   }
 }
