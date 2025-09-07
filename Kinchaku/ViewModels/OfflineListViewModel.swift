@@ -36,8 +36,8 @@ final class OfflineListViewModel: ObservableObject {
   var archivedPages: [OfflinePage] { pages.filter { $0.archived } }
   var canDownload: Bool { URL(string: inputURLString)?.scheme?.hasPrefix("http") == true }
 
-  // Manual add (still supported)
-  func downloadAndSave(token: String? = nil, favorited: Bool = false) async {
+    // Manual add (still supported)
+  func downloadAndSave(tokenStore: TokenStore, favorited: Bool = false) async {
     guard let url = URL(string: inputURLString) else { return }
     isBusy = true
     defer { isBusy = false }
@@ -59,13 +59,14 @@ final class OfflineListViewModel: ObservableObject {
       pages.insert(page, at: 0)
       sortPages()
       OfflineIndex.save(pages)
-      statusMessage = "Saved “\(page.title)” locally (\(result.assetCount) assets)"
+      statusMessage = "Saved \"\(page.title)\" locally (\(result.assetCount) assets)"
       inputURLString = ""
 
       // 2) Then POST to API (best-effort). On success 201, merge fields.
-      if let token {
+      if tokenStore.token != nil {
+        let articlesService = ArticlesServiceWithRefresh(tokenStore: tokenStore)
         do {
-          let created = try await ArticlesService.createArticle(token: token, url: url, favorited: favorited)
+          let created = try await articlesService.createArticle(url: url, favorited: favorited)
           let serverDate = serverDate // reuse the formatter already defined on the VM
           if let idx = pages.firstIndex(where: { $0.id == page.id }) {
             pages[idx].remoteId = created.id
@@ -76,13 +77,11 @@ final class OfflineListViewModel: ObservableObject {
           sortPages()
           OfflineIndex.save(pages)
           statusMessage = "Saved locally and synced to server (id \(created.id))."
-        } catch let err as AuthError {
-          if case .expired = err {
-            authExpired = true
-            statusMessage = "Saved locally. Sign in again to sync."
-          }
+        } catch AuthError.expired, AuthError.refreshFailed {
+          authExpired = true
+          statusMessage = "Saved locally. Sign in again to sync."
         } catch {
-          // Keep local record; report but don’t roll back
+          // Keep local record; report but don't roll back
           statusMessage = "Saved locally. Server create failed: \(error.localizedDescription)"
         }
       }
@@ -92,13 +91,16 @@ final class OfflineListViewModel: ObservableObject {
   }
 
   // NEW: Fetch from remote and persist offline
-  func fetchAndSyncFromServer(token: String) async {
+  func fetchAndSyncFromServer(tokenStore: TokenStore) async {
     if isSyncing { return }
     isSyncing = true
     defer { isSyncing = false }
+    
+    let articlesService = ArticlesServiceWithRefresh(tokenStore: tokenStore)
+    
     do {
       syncProgress = "Fetching remote list…"
-      let items = try await ArticlesService.fetchArticles(token: token)
+      let items = try await articlesService.fetchArticles()
 
       // Merge: update existing by remoteId or URL; add new ones
       let byRemoteId = Dictionary(uniqueKeysWithValues: pages.compactMap { p in
@@ -163,17 +165,15 @@ final class OfflineListViewModel: ObservableObject {
       } else {
         syncProgress = "Everything is already cached."
       }
-    } catch let err as AuthError {
-      if case .expired = err {
-        authExpired = true // tell the UI
-        syncProgress = "Session expired."
-      }
+    } catch AuthError.expired, AuthError.refreshFailed {
+      authExpired = true // tell the UI
+      syncProgress = "Session expired."
     } catch {
       syncProgress = "Sync failed: \(error.localizedDescription)"
     }
   }
 
-  func archive(_ page: OfflinePage, archived: Bool, token: String?) {
+  func archive(_ page: OfflinePage, archived: Bool, tokenStore: TokenStore) {
     guard let i = pages.firstIndex(of: page) else { return }
 
     // 1) Optimistic local update
@@ -192,19 +192,18 @@ final class OfflineListViewModel: ObservableObject {
     // 2) Attempt to persist to server (best-effort)
     guard let remoteId = pages[i].remoteId else { return }
 
-    if let token {
+    if tokenStore.token != nil {
+      let articlesService = ArticlesServiceWithRefresh(tokenStore: tokenStore)
       Task {
         do {
-          try await ArticlesService.updateArticleArchived(token: token, articleId: remoteId, archived: archived)
+          try await articlesService.updateArticleArchived(articleId: remoteId, archived: archived)
           await MainActor.run {
             self.statusMessage = archived ? "Archived on server." : "Unarchived on server."
           }
-        } catch let err as AuthError {
-          if case .expired = err {
-            await MainActor.run {
-              self.authExpired = true
-              self.statusMessage = "Local change saved. Sign in again to sync archive state."
-            }
+        } catch AuthError.expired, AuthError.refreshFailed {
+          await MainActor.run {
+            self.authExpired = true
+            self.statusMessage = "Local change saved. Sign in again to sync archive state."
           }
         } catch {
           await MainActor.run {
@@ -216,8 +215,7 @@ final class OfflineListViewModel: ObservableObject {
     
   }
 
-  // TODO: Add API Implementation
-  func delete(_ page: OfflinePage, token: String?) {
+  func delete(_ page: OfflinePage, tokenStore: TokenStore) {
     // 1) Optimistic local update
     OfflineIndex.removeCache(dirName: page.dirName)
     pages.removeAll { $0.id == page.id }
@@ -234,24 +232,18 @@ final class OfflineListViewModel: ObservableObject {
     // 2) Attempt to persist to server (best-effort)
     guard let remoteId = page.remoteId else { return }
 
-    // You may want to pass a token here, similar to archive
-    // For now, assume a token property or argument is available
-    // If you want to require token, add it as an argument
-    // Example: func delete(_ page: OfflinePage, token: String?)
-    // For now, try to use a token if available    
-    if let token {
+    if tokenStore.token != nil {
+      let articlesService = ArticlesServiceWithRefresh(tokenStore: tokenStore)
       Task {
         do {
-          try await ArticlesService.deleteArticle(token: token, articleId: remoteId)
+          try await articlesService.deleteArticle(articleId: remoteId)
           await MainActor.run {
             self.statusMessage = "Deleted on server."
           }
-        } catch let err as AuthError {
-          if case .expired = err {
-            await MainActor.run {
-              self.authExpired = true
-              self.statusMessage = "Local delete saved. Sign in again to sync delete state."
-            }
+        } catch AuthError.expired, AuthError.refreshFailed {
+          await MainActor.run {
+            self.authExpired = true
+            self.statusMessage = "Local delete saved. Sign in again to sync delete state."
           }
         } catch {
           await MainActor.run {

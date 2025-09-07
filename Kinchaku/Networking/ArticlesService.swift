@@ -8,7 +8,10 @@
 
 import Foundation
 
-enum AuthError: Error { case expired }
+enum AuthError: Error { 
+  case expired
+  case refreshFailed
+}
 
 enum ArticlesService {
   
@@ -64,72 +67,108 @@ enum ArticlesService {
   }
 }
 
-// class ArticleWrappedService {
-//   var retryAuth = false
+@MainActor
+class ArticlesServiceWithRefresh {
+  private let tokenStore: TokenStore
+  private var hasRetried = false
   
-//   func fetchArticles(tokenStore: TokenStore) async throws -> [RemoteArticle] {
-//     guard let token = await tokenStore.token, let refreshToken = await tokenStore.refreshToken else {
-//       throw AuthError.expired
-//     }
-    
-//     do {
-//       return try await ArticlesService.fetchArticles(token: token)
-//     } catch let err as AuthError {
-//       if err == .expired && retryAuth == false {
-//         let nextToken = try await AuthService.refresh(refreshToken: refreshToken)
-//         await tokenStore.setToken(nextToken)
-//         retryAuth = true
-//         return try await fetchArticles(tokenStore: tokenStore)
-//       } else {
-//         retryAuth = false
-//         throw err
-//       }
-//     } catch {
-//       throw error
-//     }
-//   }
+  init(tokenStore: TokenStore) {
+    self.tokenStore = tokenStore
+  }
   
-//   func createArticle(tokenStore: TokenStore, url: URL, favorited: Bool) async throws -> RemoteArticle {
-//     guard let token = await tokenStore.token, let refreshToken = await tokenStore.refreshToken else {
-//       throw AuthError.expired
-//     }
+  func fetchArticles() async throws -> [RemoteArticle] {
+    guard let token = tokenStore.token else {
+      throw AuthError.expired
+    }
     
-//     do {
-//       return try await ArticlesService.createArticle(token: token, url: url, favorited: favorited)
-//     } catch let err as AuthError {
-//       if err == .expired && retryAuth == false {
-//         let nextToken = try await AuthService.refresh(refreshToken: refreshToken)
-//         await tokenStore.setToken(nextToken)
-//         retryAuth = true
-//         return try await createArticle(tokenStore: tokenStore, url: url, favorited: favorited)
-//       } else {
-//         retryAuth = false
-//         throw err
-//       }
-//     } catch {
-//       throw error
-//     }
-//   }
+    do {
+      let result = try await ArticlesService.fetchArticles(token: token)
+      hasRetried = false // Reset retry flag on success
+      return result
+    } catch AuthError.expired {
+      return try await handleTokenRefresh { [weak self] in
+        guard let self = self, let newToken = self.tokenStore.token else {
+          throw AuthError.expired
+        }
+        return try await ArticlesService.fetchArticles(token: newToken)
+      }
+    }
+  }
   
-//   func updateArticleArchived(tokenStore: TokenStore, articleId: Int, archived: Bool) async throws {
-//     guard let token = await tokenStore.token, let refreshToken = await tokenStore.refreshToken else {
-//       throw AuthError.expired
-//     }
+  func createArticle(url: URL, favorited: Bool) async throws -> RemoteArticle {
+    guard let token = tokenStore.token else {
+      throw AuthError.expired
+    }
     
-//     do {
-//       return try await ArticlesService.updateArticleArchived(token: token, articleId: articleId, archived: archived)
-//     } catch let err as AuthError {
-//       if err == .expired && retryAuth == false {
-//         let nextToken = try await AuthService.refresh(refreshToken: refreshToken)
-//         await tokenStore.setToken(nextToken)
-//         retryAuth = true
-//         return try await updateArticleArchived(tokenStore: tokenStore, articleId: articleId, archived: archived)
-//       } else {
-//         retryAuth = false
-//         throw err
-//       }
-//     } catch {
-//       throw error
-//     }
-//   }
-// }
+    do {
+      let result = try await ArticlesService.createArticle(token: token, url: url, favorited: favorited)
+      hasRetried = false // Reset retry flag on success
+      return result
+    } catch AuthError.expired {
+      return try await handleTokenRefresh { [weak self] in
+        guard let self = self, let newToken = self.tokenStore.token else {
+          throw AuthError.expired
+        }
+        return try await ArticlesService.createArticle(token: newToken, url: url, favorited: favorited)
+      }
+    }
+  }
+  
+  func updateArticleArchived(articleId: Int, archived: Bool) async throws {
+    guard let token = tokenStore.token else {
+      throw AuthError.expired
+    }
+    
+    do {
+      try await ArticlesService.updateArticleArchived(token: token, articleId: articleId, archived: archived)
+      hasRetried = false // Reset retry flag on success
+    } catch AuthError.expired {
+      try await handleTokenRefresh { [weak self] in
+        guard let self = self, let newToken = self.tokenStore.token else {
+          throw AuthError.expired
+        }
+        return try await ArticlesService.updateArticleArchived(token: newToken, articleId: articleId, archived: archived)
+      }
+    }
+  }
+  
+  func deleteArticle(articleId: Int) async throws {
+    guard let token = tokenStore.token else {
+      throw AuthError.expired
+    }
+    
+    do {
+      try await ArticlesService.deleteArticle(token: token, articleId: articleId)
+      hasRetried = false // Reset retry flag on success
+    } catch AuthError.expired {
+      try await handleTokenRefresh { [weak self] in
+        guard let self = self, let newToken = self.tokenStore.token else {
+          throw AuthError.expired
+        }
+        return try await ArticlesService.deleteArticle(token: newToken, articleId: articleId)
+      }
+    }
+  }
+  
+  private func handleTokenRefresh<T>(_ operation: @escaping () async throws -> T) async throws -> T {
+    // Only allow one retry attempt
+    guard !hasRetried else {
+      throw AuthError.expired
+    }
+    
+    guard let refreshToken = tokenStore.refreshToken else {
+      throw AuthError.expired
+    }
+    
+    do {
+      let newToken = try await AuthService.refresh(refreshToken: refreshToken)
+      tokenStore.setToken(newToken)
+      hasRetried = true
+      
+      return try await operation()
+    } catch {
+      // If refresh fails, user must re-login
+      throw AuthError.refreshFailed
+    }
+  }
+}
