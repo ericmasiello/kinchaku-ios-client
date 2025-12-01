@@ -7,6 +7,9 @@
 
 import Foundation
 
+
+// TODO: if the website is medium, we should not store the JavaScript because it blocks the user from reading the site
+
 enum HTMLAssetExtractor {
   static func extractAssetURLs(in html: String, baseURL: URL) -> [URL] {
     var results: Set<URL> = []

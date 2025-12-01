@@ -15,11 +15,13 @@ struct LoginView: View {
     NavigationView {
       VStack(spacing: 16) {
         TextField("Email", text: $vm.email)
+          .autocorrectionDisabled()
+          .focused($focused)
+          .textFieldStyle(.roundedBorder)
+        #if !os(macOS)
           .textInputAutocapitalization(.never)
           .keyboardType(.emailAddress)
-          .autocorrectionDisabled()
-          .textFieldStyle(.roundedBorder)
-          .focused($focused)
+        #endif
         SecureField("Password", text: $vm.password)
           .textFieldStyle(.roundedBorder)
 

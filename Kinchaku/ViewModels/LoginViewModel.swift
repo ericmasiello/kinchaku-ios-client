@@ -31,6 +31,8 @@ final class LoginViewModel: ObservableObject {
       tokenStore.setToken(loginResponse.token)
       tokenStore.setRefreshToken(loginResponse.refreshToken)
     }
-    catch { errorMessage = error.localizedDescription }
+    catch {
+      errorMessage = error.localizedDescription
+    }
   }
 }

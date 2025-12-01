@@ -26,7 +26,11 @@ struct OfflineAppView: View {
       listSection
     }
     .padding()
-    .navigationTitle("Offline Pages")
+    .navigationTitle("Saves")
+    // only add this for non MacOS
+    #if !os(macOS)
+    .navigationBarTitleDisplayMode(.inline)
+    #endif
     .toolbar {
       toolbarContent
     }
@@ -46,8 +50,8 @@ struct OfflineAppView: View {
   
   private var statusRow: some View {
     HStack {
-      if let msg = vm.statusMessage { 
-        Text(msg).font(.footnote).foregroundColor(.secondary) 
+      if let msg = vm.statusMessage {
+        Text(msg).font(.footnote).foregroundColor(.secondary)
       }
       Spacer()
     }
@@ -69,10 +73,13 @@ struct OfflineAppView: View {
   private var addRowSection: some View {
     HStack {
       TextField("https://example.com", text: $vm.inputURLString)
+      #if os(iOS)
         .textInputAutocapitalization(.never)
-        .keyboardType(.URL)
+        .keyboardType(.webSearch)
+      #endif
+        .textContentType(.URL)
         .disableAutocorrection(true)
-        .textFieldStyle(.roundedBorder)
+        .textFieldStyle(.plain)
       Button {
         Task {
           await vm.downloadAndSave(tokenStore: tokenStore, favorited: false)
@@ -80,7 +87,7 @@ struct OfflineAppView: View {
       } label: {
         vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Save"))
       }
-      .buttonStyle(.borderedProminent)
+      .buttonStyle(.glassProminent)
       .disabled(!vm.canDownload || vm.isBusy)
     }
   }
@@ -91,7 +98,11 @@ struct OfflineAppView: View {
       archivedPagesSection
       emptyStateSection
     }
+    #if !os(macOS)
     .listStyle(.insetGrouped)
+    #else
+    .listStyle(.plain)
+    #endif
     .refreshable {
       await vm.fetchAndSyncFromServer(tokenStore: tokenStore)
     }
@@ -104,27 +115,30 @@ struct OfflineAppView: View {
         ForEach(vm.activePages) { page in
           PageRow(page: page)
             .contentShape(Rectangle())
-            .onTapGesture { 
-              if OfflineIndex.hasCache(for: page) { 
-                selectedPage = page 
-              } 
+            .onTapGesture {
+              if OfflineIndex.hasCache(for: page) {
+                selectedPage = page
+              }
             }
             .overlay(alignment: .trailing) {
               if !OfflineIndex.hasCache(for: page) {
                 Text("Downloading…").font(.caption2).foregroundColor(.secondary)
               }
             }
+            // make it so that full swipe achives the document
+          
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-              Button(role: .destructive) {
-                vm.delete(page, tokenStore: tokenStore)
-              } label: {
-                Label("Delete", systemImage: "trash")
-              }
               Button {
                 vm.archive(page, archived: true, tokenStore: tokenStore)
               } label: {
                 Label("Archive", systemImage: "archivebox")
               }.tint(.gray)
+              
+              Button(role: .destructive) {
+                vm.delete(page, tokenStore: tokenStore)
+              } label: {
+                Label("Delete", systemImage: "trash")
+              }
             }
         }
       }
@@ -138,10 +152,10 @@ struct OfflineAppView: View {
         ForEach(vm.archivedPages) { page in
           PageRow(page: page)
             .contentShape(Rectangle())
-            .onTapGesture { 
-              if OfflineIndex.hasCache(for: page) { 
-                selectedPage = page 
-              } 
+            .onTapGesture {
+              if OfflineIndex.hasCache(for: page) {
+                selectedPage = page
+              }
             }
             .swipeActions {
               Button {
@@ -160,7 +174,7 @@ struct OfflineAppView: View {
     }
   }
   
-  @ViewBuilder 
+  @ViewBuilder
   private var emptyStateSection: some View {
     if vm.activePages.isEmpty && vm.archivedPages.isEmpty {
       ContentUnavailableView("No pages",
@@ -168,10 +182,18 @@ struct OfflineAppView: View {
                              description: Text("Sign in and your saved list will appear here."))
     }
   }
+
+  #if !os(macOS)
+  private var refreshToolPlacement: ToolbarItemPlacement = .navigationBarTrailing
+  private var logoutToolPlacement: ToolbarItemPlacement = .navigationBarLeading
+  #else
+  private var refreshToolPlacement: ToolbarItemPlacement = .automatic
+  private var logoutToolPlacement: ToolbarItemPlacement = .automatic
+  #endif
   
   @ToolbarContentBuilder
   private var toolbarContent: some ToolbarContent {
-    ToolbarItemGroup(placement: .navigationBarTrailing) {
+    ToolbarItemGroup(placement: refreshToolPlacement) {
       Button {
         Task {
           await vm.fetchAndSyncFromServer(tokenStore: tokenStore)
@@ -186,9 +208,9 @@ struct OfflineAppView: View {
       .disabled(vm.isSyncing)
     }
 
-    ToolbarItem(placement: .navigationBarLeading) {
-      Button(role: .destructive) { 
-        tokenStore.logout() 
+    ToolbarItem(placement: logoutToolPlacement) {
+      Button(role: .destructive) {
+        tokenStore.logout()
       } label: {
         Label("Logout", systemImage: "rectangle.portrait.and.arrow.right")
       }
