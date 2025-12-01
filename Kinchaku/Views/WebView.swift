@@ -8,12 +8,12 @@
 import SwiftUI
 import WebKit
 
+#if os(iOS)
 struct WebView: UIViewRepresentable {
   let fileURL: URL
   let allowDir: URL
   func makeUIView(context: Context) -> WKWebView {
     let cfg = WKWebViewConfiguration()
-    cfg.allowsInlineMediaPlayback = true
     let wv = WKWebView(frame: .zero, configuration: cfg)
     wv.loadFileURL(fileURL, allowingReadAccessTo: allowDir)
     return wv
@@ -21,6 +21,21 @@ struct WebView: UIViewRepresentable {
 
   func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
+
+#elseif os(macOS)
+struct WebView: NSViewRepresentable {
+  let fileURL: URL
+  let allowDir: URL
+  func makeNSView(context: Context) -> WKWebView {
+    let cfg = WKWebViewConfiguration()
+    let wv = WKWebView(frame: .zero, configuration: cfg)
+    wv.loadFileURL(fileURL, allowingReadAccessTo: allowDir)
+    return wv
+  }
+
+  func updateNSView(_ nsView: WKWebView, context: Context) {}
+}
+#endif
 
 // Minimal preview that renders a tiny HTML string into a temp file
 #Preview {

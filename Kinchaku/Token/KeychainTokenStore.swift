@@ -9,7 +9,9 @@ import Foundation
 import Security
 
 struct KeychainTokenStore {
-  let service: String; let account: String
+  let service: String;
+  let account: String
+  
   func save(_ token: String) {
     let data = Data(token.utf8)
     let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,

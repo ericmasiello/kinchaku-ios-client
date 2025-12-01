@@ -8,18 +8,20 @@
 import SwiftUI
 
 struct LoginView: View {
-  @EnvironmentObject var appState: AppState
+  @EnvironmentObject var tokenStore: TokenStore
   @StateObject private var vm = LoginViewModel()
   @FocusState private var focused: Bool
   var body: some View {
     NavigationView {
       VStack(spacing: 16) {
         TextField("Email", text: $vm.email)
+          .autocorrectionDisabled()
+          .focused($focused)
+          .textFieldStyle(.roundedBorder)
+        #if !os(macOS)
           .textInputAutocapitalization(.never)
           .keyboardType(.emailAddress)
-          .autocorrectionDisabled()
-          .textFieldStyle(.roundedBorder)
-          .focused($focused)
+        #endif
         SecureField("Password", text: $vm.password)
           .textFieldStyle(.roundedBorder)
 
@@ -29,7 +31,7 @@ struct LoginView: View {
         }
 
         Button {
-          Task { await vm.submit(appState: appState) }
+          Task { await vm.submit(tokenStore: tokenStore) }
         } label: {
           vm.isBusy ? AnyView(ProgressView()) : AnyView(Text("Log In"))
         }

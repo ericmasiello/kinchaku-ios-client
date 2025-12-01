@@ -9,8 +9,8 @@ import Foundation
 import SwiftUI
 
 enum PreviewFixtures {
-  @MainActor static func makeAppState(token: String?) -> AppState {
-    let s = AppState()
+  @MainActor static func makeAppState(token: String?) -> TokenStore {
+    let s = TokenStore()
     s.token = token
     return s
   }

@@ -7,7 +7,6 @@
 
 import Foundation
 
-struct LoginResponse: Codable { let token: String }
 
 struct ArticlesEnvelope: Codable { let items: [RemoteArticle] }
 

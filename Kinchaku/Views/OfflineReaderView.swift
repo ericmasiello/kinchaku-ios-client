@@ -17,11 +17,19 @@ struct OfflineReaderView: View, Identifiable {
       {
         WebView(fileURL: file, allowDir: dir)
           .navigationTitle(page.title.isEmpty ? "Offline Page" : page.title)
+        #if !os(macOS)
           .navigationBarTitleDisplayMode(.inline)
+        #endif
           .toolbar {
+            #if !os(macOS)
             ToolbarItem(placement: .navigationBarTrailing) {
               Link(destination: page.originalURL) { Image(systemName: "safari") }
             }
+            #else
+            ToolbarItem {
+              Link(destination: page.originalURL) { Image(systemName: "safari") }
+            }
+            #endif
           }
       } else {
         Text("This page is not cached yet.").padding()
